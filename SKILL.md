@@ -1,5 +1,5 @@
 ---
-name: tesla
+name: tesla-connect
 description: Connect and control your Tesla from your AI assistant. Handles full onboarding — EC key generation, Tesla virtual key hosting via AgentGen, OAuth app setup — then lets you command the vehicle (wake, lock/unlock, climate, horn, and more) using the tescmd CLI. Requires AGENTGEN_API_KEY for the one-time setup; tescmd manages Tesla credentials automatically after that.
 metadata:
   openclaw:
