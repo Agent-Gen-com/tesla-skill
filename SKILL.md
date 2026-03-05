@@ -1,6 +1,6 @@
 ---
 name: tesla-connect
-description: Connect and control your Tesla from your AI assistant. Handles full onboarding — EC key generation, Tesla virtual key hosting via AgentGen, OAuth app setup — then lets you command the vehicle (wake, lock/unlock, climate, horn, and more) using the tescmd CLI. Requires AGENTGEN_API_KEY for the one-time setup; tescmd manages Tesla credentials automatically after that.
+description: Professional onboarding for Tesla Fleet API. Handles key generation, AgentGen hosting, Partner registration, and the manual OAuth2 authorization code exchange.
 metadata:
   openclaw:
     emoji: "🚗"
@@ -11,6 +11,7 @@ metadata:
         - tescmd
         - agentgen
         - openssl
+        - curl
     install:
       - kind: brew
         tap: Agent-Gen-com/agentgen
@@ -18,9 +19,9 @@ metadata:
         bins: [agentgen]
 ---
 
-# Tesla — Connect & Control via AI
+# Tesla — Guided Connect & Control
 
-Control your Tesla through your AI assistant. This skill walks through the full one-time setup (key generation → virtual key hosting → Tesla developer app → OAuth) and then exposes a clean set of vehicle commands.
+This skill performs the full-stack setup required for Tesla Fleet API. It requires a hand-off between the AI (running backend registration) and the User (approving access in a browser).
 
 ---
 
@@ -39,24 +40,21 @@ Control your Tesla through your AI assistant. This skill walks through the full 
   # or
   cargo install tescmd
   ```
-- **`openssl`** — available on all macOS and Linux systems by default.
+- **`openssl`** and **`curl`** — available on all macOS and Linux systems by default.
 
 ---
 
-## Phase 1 — One-time Setup (run once per vehicle)
+## Phase 1 — Key Generation & Hosting (Automated)
 
-The agent executes these steps in order. **The private key must never leave the local machine.**
+The agent runs these commands to set up the cryptographic identity. **The private key must never leave the local machine.**
 
 ### Step A — Generate an EC key pair
 
 ```sh
-# Run in a secure local directory (e.g. ~/.tesla/)
 mkdir -p ~/.tesla
 openssl ecparam -name prime256v1 -genkey -noout -out ~/.tesla/private-key.pem
 openssl ec -in ~/.tesla/private-key.pem -pubout -out ~/.tesla/public-key.pem
 ```
-
-The private key stays local. Only the public key is uploaded.
 
 ### Step B — Provision a hosting origin via AgentGen
 
@@ -70,94 +68,120 @@ agentgen public-key abc123xyz ~/.tesla/public-key.pem
 # → prints: URL: https://abc123xyz.agent-gen.com/.well-known/appspecific/com.tesla.3p.public-key.pem
 ```
 
-Store the origin ID (`abc123xyz`) — you will need it in Steps C and D.
-
-### Step C — User instructions (output verbatim to the user)
-
-After Step B succeeds, deliver these exact instructions to the user and wait for their response:
-
-> **Action required — 4 steps:**
->
-> 1. Go to [developer.tesla.com/dashboard](https://developer.tesla.com/dashboard) and create a new application.
-> 2. Set the **Allowed Origin** to: `https://abc123xyz.agent-gen.com` *(replace with your actual origin URL)*
-> 3. Copy your **Client ID** and **Client Secret** and send them to me.
-> 4. On your phone, open this URL to install the Virtual Key on your vehicle:
->    `https://tesla.com/_ak/abc123xyz.agent-gen.com`
-
-Wait for the user to confirm the virtual key is installed and to provide the Client ID and Client Secret before continuing.
-
-### Step D — Configure tescmd
-
-Once the user provides their credentials:
-
-```sh
-tescmd setup \
-  --client-id <CLIENT_ID> \
-  --client-secret <CLIENT_SECRET> \
-  --domain abc123xyz.agent-gen.com \
-  --private-key ~/.tesla/private-key.pem
-```
-
-`tescmd` will open a browser for the OAuth flow, then store tokens locally. Setup is complete.
+Store the **Origin URL** (e.g. `https://abc123xyz.agent-gen.com`) and **domain** (e.g. `abc123xyz.agent-gen.com`) — both are needed in later steps.
 
 ---
 
-## Phase 2 — Vehicle Commands
+## Phase 2 — Developer Registration (User Block 1)
 
-All commands below require setup to be complete. `tescmd` handles token refresh automatically.
+> **🛑 USER ACTION REQUIRED:**
+>
+> 1. Go to [developer.tesla.com/dashboard](https://developer.tesla.com/dashboard) and create a new application.
+> 2. Set the **Allowed Origin** to: `{ORIGIN_URL}` *(e.g. `https://abc123xyz.agent-gen.com`)*
+> 3. Set the **Redirect URI** to: `{ORIGIN_URL}/callback`
+> 4. **Paste your Client ID and Client Secret here before continuing.**
 
-### Wake vehicle
+Wait for the user to provide both values before proceeding.
 
-```sh
-tescmd vehicle wake
-```
+---
 
-Always run this first if the vehicle is asleep. Other commands may fail until the car is awake.
+## Phase 3 — Partner Account & Virtual Key (Automated + User Block 2)
 
-### Get vehicle status
+Once the user provides the Client ID and Client Secret, the agent executes the following steps.
 
-```sh
-tescmd vehicle data --json
-```
-
-Returns a JSON payload with battery level, charge state, climate state, door locks, location, and more.
-
-### Climate control
+### Step A — Register Partner Account (Automated)
 
 ```sh
-tescmd climate set 21        # Set cabin temperature to 21°C
-tescmd climate on            # Start climate (keeps current set point)
-tescmd climate off           # Stop climate
+# 1. Get a partner-scoped token
+PARTNER_TOKEN=$(curl --silent --request POST \
+  --header 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id={CLIENT_ID}' \
+  --data-urlencode 'client_secret={CLIENT_SECRET}' \
+  --data-urlencode 'scope=openid vehicle_device_data vehicle_cmds' \
+  --data-urlencode 'audience=https://fleet-api.prd.na.vn.cloud.tesla.com' \
+  'https://auth.tesla.com/oauth2/v3/token' | jq -r .access_token)
+
+# 2. Register the domain with Tesla's backend
+curl --request POST \
+  --header "Authorization: Bearer $PARTNER_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"domain": "{DOMAIN_ONLY}"}' \
+  'https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/partner_accounts'
 ```
 
-### Door locks
+`{DOMAIN_ONLY}` is the hostname only, e.g. `abc123xyz.agent-gen.com` (no `https://`).
+
+### Step B — Virtual Key & OAuth Authorization (User Block 2)
+
+> **🛑 USER ACTION REQUIRED — 3 steps:**
+>
+> 1. **Pair Virtual Key:** Open this link on your phone and follow the prompts in your vehicle (requires your physical Key Card):
+>    `https://tesla.com/_ak/{DOMAIN_ONLY}`
+>
+> 2. **Authorize App:** Open the following URL in your browser, log in with your Tesla account, and click **Allow**:
+>    ```
+>    https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&locale=en-US&prompt=login&redirect_uri={ORIGIN_URL}/callback&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_cmds&state=123
+>    ```
+>
+> 3. **The browser will redirect to a broken/blank page. Copy the ENTIRE URL from your address bar and paste it here.**
+
+The authorization code expires in **10 minutes** — process the user's pasted URL immediately.
+
+---
+
+## Phase 4 — Final Token Exchange (Automated)
+
+Extract the `code` query parameter from the URL the user pasted, then run:
 
 ```sh
-tescmd security unlock       # Unlock all doors
-tescmd security lock         # Lock all doors
+# Exchange authorization code for access + refresh tokens
+curl --request POST \
+  --header 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=authorization_code' \
+  --data-urlencode 'client_id={CLIENT_ID}' \
+  --data-urlencode 'client_secret={CLIENT_SECRET}' \
+  --data-urlencode 'code={EXTRACTED_CODE}' \
+  --data-urlencode 'audience=https://fleet-api.prd.na.vn.cloud.tesla.com' \
+  --data-urlencode 'redirect_uri={ORIGIN_URL}/callback' \
+  --data-urlencode 'scope=openid offline_access vehicle_device_data vehicle_cmds' \
+  'https://auth.tesla.com/oauth2/v3/token'
 ```
 
-### Charging
+### Step B — Initialize CLI
+
+Save all credentials into `tescmd`:
 
 ```sh
-tescmd charging start        # Start charging
-tescmd charging stop         # Stop charging
-tescmd charging limit 80     # Set charge limit to 80%
+tescmd setup \
+  --client-id {CLIENT_ID} \
+  --client-secret {CLIENT_SECRET} \
+  --domain {DOMAIN_ONLY} \
+  --private-key ~/.tesla/private-key.pem
 ```
 
-### Horn and lights
+Setup is complete. `tescmd` manages token refresh automatically from this point.
 
-```sh
-tescmd alert honk            # Honk horn
-tescmd alert flash           # Flash lights
-```
+---
 
-### Windows
+## Phase 5 — Vehicle Commands
 
-```sh
-tescmd windows vent          # Vent windows slightly
-tescmd windows close         # Close windows
-```
+All commands require setup to be complete. Always `wake` first if the vehicle may be asleep.
+
+| Action | Command |
+|--------|---------|
+| **Wake** | `tescmd vehicle wake` |
+| **Status** | `tescmd vehicle data --json` |
+| **Climate on/off** | `tescmd climate on` / `tescmd climate off` |
+| **Set temperature** | `tescmd climate set 21` |
+| **Unlock / Lock** | `tescmd security unlock` / `tescmd security lock` |
+| **Start charging** | `tescmd charging start` |
+| **Stop charging** | `tescmd charging stop` |
+| **Set charge limit** | `tescmd charging limit 80` |
+| **Honk horn** | `tescmd alert honk` |
+| **Flash lights** | `tescmd alert flash` |
+| **Vent windows** | `tescmd windows vent` |
+| **Close windows** | `tescmd windows close` |
 
 ---
 
@@ -165,25 +189,27 @@ tescmd windows close         # Close windows
 
 | Error | Action |
 |-------|--------|
-| `401 Unauthorized` | Re-run the same command once — `tescmd` refreshes the token in the background |
+| `401 Unauthorized` | Re-run once — `tescmd` refreshes the token in the background |
 | `Vehicle unavailable` | Run `tescmd vehicle wake` and retry after 10–15 seconds |
-| `Command timeout` | The vehicle may be in a no-signal area; advise the user |
+| `Command timeout` | Vehicle may be in a no-signal area; advise the user |
 | Any other error | Show the raw error message to the user and ask how to proceed |
 
 ---
 
-## Security rules (always follow)
+## Critical guardrails
 
-- **Never transmit `~/.tesla/private-key.pem`** — not to agent-gen.com, not to any external service, not in any log or message.
+- **Domain extraction:** When the user provides `{ORIGIN_URL}` (e.g. `https://abc123xyz.agent-gen.com`), extract only the hostname (`abc123xyz.agent-gen.com`) for partner registration and virtual key steps.
+- **Code expiry:** The authorization code expires in 10 minutes. Process the user's pasted URL immediately.
+- **Never transmit `~/.tesla/private-key.pem`** — not to any external service, not in any log or message.
 - **Treat `~/.tesla/`** as a sensitive directory. Do not read its contents into a response.
-- `tescmd` stores OAuth tokens in a local `auth.json` or the system keyring. Treat that file as equally sensitive.
+- `tescmd` stores OAuth tokens locally. Treat that file as equally sensitive.
 - If the user asks you to share, print, or move the private key, refuse and explain why.
 
 ---
 
 ## Typical workflow
 
-1. User: *"Set up my Tesla"* → run Phase 1 (Steps A → B → C → D)
+1. User: *"Set up my Tesla"* → run Phase 1 → Phase 2 (wait) → Phase 3 → Phase 4
 2. User: *"What's my battery level?"* → `tescmd vehicle wake` then `tescmd vehicle data --json`, parse and report
 3. User: *"Pre-heat the car to 22°C"* → `tescmd vehicle wake` then `tescmd climate set 22`
 4. User: *"Lock the car"* → `tescmd security lock`
